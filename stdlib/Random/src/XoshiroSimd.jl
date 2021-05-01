@@ -28,82 +28,53 @@ simdThreshold(::Type{Bool}) = 4096
     x, y)
 
 
-# required operations. These could be written more concise with `ntuple`, but the compiler
+# required operations. These could be written more concisely with `ntuple`, but the compiler
 # sometimes refuses to properly vectorize.
 for N in [1,2,4,8,16,32]
-    let
-        local code
-        code = """
-        %lshiftOp = shufflevector <1 x i64> <i64 45>, <1 x i64> undef, <$N x i32> zeroinitializer
-        %rshiftOp = shufflevector <1 x i64> <i64 19>, <1 x i64> undef, <$N x i32> zeroinitializer
-        %lshifted = shl <$N x i64> %0, %lshiftOp
-        %rshifted = lshr <$N x i64> %0, %rshiftOp
-        %res = or <$N x i64> %lshifted, %rshifted
-        ret <$N x i64> %res
-        """
-        @eval @inline _rotl45(x::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}},
-            x)
+    let code, s, fshl = "llvm.fshl.v$(N)i64",
+        VT = :(NTuple{$N, VecElement{UInt64}})
+
+        s = ntuple(_->VecElement(UInt64(45)), N)
+        @eval @inline _rotl45(x::$VT) = ccall($fshl, llvmcall, $VT, ($VT, $VT, $VT), x, x, $s)
+
+        s = ntuple(_->VecElement(UInt64(23)), N)
+        @eval @inline _rotl23(x::$VT) = ccall($fshl, llvmcall, $VT, ($VT, $VT, $VT), x, x, $s)
 
         code = """
         %lshiftOp = shufflevector <1 x i64> <i64 17>, <1 x i64> undef, <$N x i32> zeroinitializer
         %res = shl <$N x i64> %0, %lshiftOp
         ret <$N x i64> %res
         """
-        @eval @inline _shl17(x::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}},
-            x)
-
-        code = """
-        %lshiftOp = shufflevector <1 x i64> <i64 23>, <1 x i64> undef, <$N x i32> zeroinitializer
-        %rshiftOp = shufflevector <1 x i64> <i64 41>, <1 x i64> undef, <$N x i32> zeroinitializer
-        %lshifted = shl <$N x i64> %0, %lshiftOp
-        %rshifted = lshr <$N x i64> %0, %rshiftOp
-        %res = or <$N x i64> %lshifted, %rshifted
-        ret <$N x i64> %res
-        """
-        @eval @inline _rotl23(x::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}},
-            x)
+        @eval @inline _shl17(x::$VT) = Core.Intrinsics.llvmcall($code,
+            $VT, Tuple{$VT}, x)
 
         code = """
         %res = add <$N x i64> %1, %0
         ret <$N x i64> %res
         """
-        @eval @inline _plus(x::NTuple{$N, VecElement{UInt64}}, y::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}, NTuple{$N, VecElement{UInt64}}},
-            x, y)
+        @eval @inline _plus(x::$VT, y::$VT) = Core.Intrinsics.llvmcall($code,
+            $VT, Tuple{$VT, $VT}, x, y)
 
         code = """
         %res = xor <$N x i64> %1, %0
         ret <$N x i64> %res
         """
-        @eval @inline _xor(x::NTuple{$N, VecElement{UInt64}}, y::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}, NTuple{$N, VecElement{UInt64}}},
-            x, y)
+        @eval @inline _xor(x::$VT, y::$VT) = Core.Intrinsics.llvmcall($code,
+            $VT, Tuple{$VT, $VT}, x, y)
 
         code = """
         %res = and <$N x i64> %1, %0
         ret <$N x i64> %res
         """
-        @eval @inline _and(x::NTuple{$N, VecElement{UInt64}}, y::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}, NTuple{$N, VecElement{UInt64}}},
-            x, y)
+        @eval @inline _and(x::$VT, y::$VT) = Core.Intrinsics.llvmcall($code,
+            $VT, Tuple{$VT, $VT}, x, y)
 
         code = """
         %res = or <$N x i64> %1, %0
         ret <$N x i64> %res
         """
-        @eval @inline _or(x::NTuple{$N, VecElement{UInt64}}, y::NTuple{$N, VecElement{UInt64}}) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}, NTuple{$N, VecElement{UInt64}}},
-            x, y)
+        @eval @inline _or(x::$VT, y::$VT) = Core.Intrinsics.llvmcall($code,
+            $VT, Tuple{$VT, $VT}, x, y)
 
         code = """
         %tmp = insertelement <1 x i64> undef, i64 %1, i32 0
@@ -111,11 +82,8 @@ for N in [1,2,4,8,16,32]
         %res = lshr <$N x i64> %0, %shift
         ret <$N x i64> %res
         """
-        @eval @inline _lshr(x::NTuple{$N, VecElement{UInt64}}, y::Int64) = Core.Intrinsics.llvmcall($code,
-            NTuple{$N, VecElement{UInt64}},
-            Tuple{NTuple{$N, VecElement{UInt64}}, Int64},
-            x, y)
-
+        @eval @inline _lshr(x::$VT, y::Int64) = Core.Intrinsics.llvmcall($code,
+            $VT, Tuple{$VT, Int64}, x, y)
     end
 end
 
@@ -168,8 +136,7 @@ end
         task = current_task()
         s0, s1, s2, s3 = task.rngState0, task.rngState1, task.rngState2, task.rngState3
     else
-        rng::Xoshiro
-        s0, s1, s2, s3 = rng.s0, rng.s1, rng.s2, rng.s3
+        (; s0, s1, s2, s3) = rng::Xoshiro
     end
 
     i = 0
@@ -213,8 +180,7 @@ end
         task = current_task()
         s0, s1, s2, s3 = task.rngState0, task.rngState1, task.rngState2, task.rngState3
     else
-        rng::Xoshiro
-        s0, s1, s2, s3 = rng.s0, rng.s1, rng.s2, rng.s3
+        (; s0, s1, s2, s3) = rng::Xoshiro
     end
 
     i = 0
