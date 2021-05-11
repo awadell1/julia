@@ -27,10 +27,16 @@ simdThreshold(::Type{Bool}) = 4096
     Tuple{UInt64, Int64},
     x, y)
 
+@inline _minus1(x::UInt64, ::Type{Float64}) = reinterpret(UInt64, reinterpret(Float64, x) - 1.0)
+@inline function _minus1(x::UInt64, ::Type{Float32})
+    u = reinterpret(Float32, (x>>32) % UInt32) - 1.0f0
+    l = reinterpret(Float32, x % UInt32) - 1.0f0
+    (UInt64(reinterpret(UInt32, u)) << 32) | UInt64(reinterpret(UInt32, l))
+end
 
 # required operations. These could be written more concisely with `ntuple`, but the compiler
 # sometimes refuses to properly vectorize.
-for N in [1,2,4,8,16,32]
+for N in [4,8,16]
     let code, s, fshl = "llvm.fshl.v$(N)i64",
         VT = :(NTuple{$N, VecElement{UInt64}})
 
@@ -84,6 +90,28 @@ for N in [1,2,4,8,16,32]
         """
         @eval @inline _lshr(x::$VT, y::Int64) = Core.Intrinsics.llvmcall($code,
             $VT, Tuple{$VT, Int64}, x, y)
+
+        s = "<" * join(fill("double 1.0", N), ", ") * ">"
+        code = """
+        %f = bitcast <$N x i64> %0 to <$N x double>
+        %res = fsub <$N x double> %f, $s
+        %i = bitcast <$N x double> %res to <$N x i64>
+        ret <$N x i64> %i
+        """
+        @eval @inline function _minus1(x::$VT, ::Type{Float64})
+            Core.Intrinsics.llvmcall($code, $VT, Tuple{$VT}, x)
+        end
+
+        s = "<" * join(fill("float 1.0", 2N), ", ") * ">"
+        code = """
+        %f = bitcast <$N x i64> %0 to <$(2N) x float>
+        %res = fsub <$(2N) x float> %f, $s
+        %i = bitcast <$(2N) x float> %res to <$N x i64>
+        ret <$N x i64> %i
+        """
+        @eval @inline function _minus1(x::$VT, ::Type{Float32})
+            Core.Intrinsics.llvmcall($code, $VT, Tuple{$VT}, x)
+        end
     end
 end
 
@@ -116,19 +144,21 @@ function forkRand(rng::Union{TaskLocalRNG, Xoshiro}, ::Val{N}) where N
     (s0, s1, s2, s3)
 end
 
-@inline function xoshiro_bulk(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, T::Union{Type{UInt8}, Type{Bool}, Type{Float32}, Type{Float64}}, ::Val{N}) where N
+_id(x, T) = x
+
+@inline function xoshiro_bulk(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, T::Union{Type{UInt8}, Type{Bool}, Type{Float32}, Type{Float64}}, ::Val{N}, f::F = _id) where {N, F}
     if len >= simdThreshold(T)
-        written = xoshiro_bulk_simd(rng, dst, len, T, Val(N))
+        written = xoshiro_bulk_simd(rng, dst, len, T, Val(N), f)
         len -= written
         dst += written
     end
     if len != 0
-        xoshiro_bulk_nosimd(rng, dst, len, T)
+        xoshiro_bulk_nosimd(rng, dst, len, T, f)
     end
     nothing
 end
 
-@noinline function xoshiro_bulk_nosimd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{T}) where {T}
+@noinline function xoshiro_bulk_nosimd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{T}, f::F) where {T, F}
     # we rely on specialization, llvm const-prop + instcombine to remove unneeded masking
     mskOR =  oneBits(T)
     mskAND = mskBits(T)
@@ -143,7 +173,7 @@ end
     while i+8 <= len
         res = _rotl23(_plus(s0,s3))
         res = _or(_and(res, mskAND), mskOR)
-        unsafe_store!(reinterpret(Ptr{UInt64}, dst + i), res)
+        unsafe_store!(reinterpret(Ptr{UInt64}, dst + i), f(res, T))
         t = _shl17(s1)
         s2 = _xor(s2, s0)
         s3 = _xor(s3, s1)
@@ -163,7 +193,7 @@ end
         s0 = _xor(s0, s3)
         s2 = _xor(s2, t)
         s3 = _rotl45(s3)
-        ref = Ref(res)
+        ref = Ref(f(res, T))
         # TODO: This may make the random-stream dependent on system endianness
         ccall(:memcpy, Ptr{Cvoid}, (Ptr{UInt8}, Ptr{UInt64}, Csize_t), dst+i, ref, len-i)
     end
@@ -175,7 +205,7 @@ end
     nothing
 end
 
-@noinline function xoshiro_bulk_nosimd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{Bool})
+@noinline function xoshiro_bulk_nosimd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{Bool}, f)
     if rng isa TaskLocalRNG
         task = current_task()
         s0, s1, s2, s3 = task.rngState0, task.rngState1, task.rngState2, task.rngState3
@@ -225,7 +255,7 @@ end
 end
 
 
-@noinline function xoshiro_bulk_simd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{T}, ::Val{N}) where {T,N}
+@noinline function xoshiro_bulk_simd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{T}, ::Val{N}, f::F) where {T,N,F}
     # we rely on specialization, llvm const-prop + instcombine to remove unneeded masking
     mskOR =  oneBits(T, Val(N))
     mskAND = mskBits(T, Val(N))
@@ -243,13 +273,13 @@ end
         s0 = _xor(s0, s3)
         s2 = _xor(s2, t)
         s3 = _rotl45(s3)
-        unsafe_store!(reinterpret(Ptr{NTuple{N,VecElement{UInt64}}}, dst + i), res)
+        unsafe_store!(reinterpret(Ptr{NTuple{N,VecElement{UInt64}}}, dst + i), f(res, T))
         i += 8*N
     end
     return i
 end
 
-@noinline function xoshiro_bulk_simd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{Bool}, ::Val{N}) where {N}
+@noinline function xoshiro_bulk_simd(rng::Union{TaskLocalRNG, Xoshiro}, dst::Ptr{UInt8}, len::Int, ::Type{Bool}, ::Val{N}, f) where {N}
     s0, s1, s2, s3 = forkRand(rng, Val(N))
     msk = ntuple(i->VecElement(0x0101010101010101), Val(N))
     i = 0
@@ -274,18 +304,12 @@ end
 
 
 function rand!(rng::Union{TaskLocalRNG, Xoshiro}, dst::Array{Float32}, ::SamplerTrivial{CloseOpen01{Float32}})
-    GC.@preserve dst xoshiro_bulk(rng, convert(Ptr{UInt8}, pointer(dst)), length(dst)*4, Float32, xoshiroWidth())
-    @inbounds @simd for i = 1:length(dst)
-        dst[i] = dst[i] - 1.0f0
-    end
+    GC.@preserve dst xoshiro_bulk(rng, convert(Ptr{UInt8}, pointer(dst)), length(dst)*4, Float32, xoshiroWidth(), _minus1)
     dst
 end
 
 function rand!(rng::Union{TaskLocalRNG, Xoshiro}, dst::Array{Float64}, ::SamplerTrivial{CloseOpen01{Float64}})
-    GC.@preserve dst xoshiro_bulk(rng, convert(Ptr{UInt8}, pointer(dst)), length(dst)*8, Float64, xoshiroWidth())
-    @inbounds @simd for i = 1:length(dst)
-        dst[i] = dst[i] - 1.0e0
-    end
+    GC.@preserve dst xoshiro_bulk(rng, convert(Ptr{UInt8}, pointer(dst)), length(dst)*8, Float64, xoshiroWidth(), _minus1)
     dst
 end
 
