@@ -56,6 +56,7 @@ JL_DLLEXPORT void jl_init_options(void)
                         0,    // nprocs
                         NULL, // machine_file
                         NULL, // project
+                        NULL, // program_file
                         0,    // isinteractive
                         0,    // color
                         JL_OPTIONS_HISTORYFILE_ON, // history file
@@ -969,6 +970,7 @@ restart_switch:
                       "This is a bug, please report it.", c);
         }
     }
+    jl_options.program_file = optind < argc ? strdup(argv[optind]) : "";
     parsing_args_done:
     jl_options.code_coverage = codecov;
     jl_options.malloc_log = malloclog;
